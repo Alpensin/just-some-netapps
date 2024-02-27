@@ -5,14 +5,20 @@ import (
 	"io"
 	"log"
 	"net"
+	"sync"
 	"time"
 )
 
 const tcpPort = "6969"
 
+type activeConnections struct {
+	conns map[net.Conn]struct{}
+	rw    sync.RWMutex
+}
+
 func finishConnection(conn net.Conn) {
 	conn.Close()
-	log.Printf("Connection with %s was closed", conn.RemoteAddr())
+	log.Printf("connection with %s was closed", conn.RemoteAddr())
 }
 
 func connReader(conn net.Conn, msgs chan string) {
@@ -27,6 +33,30 @@ func connReader(conn net.Conn, msgs chan string) {
 			}
 		}
 		msgs <- string(buffer[:n])
+	}
+}
+
+func sendMessages(ac *activeConnections, msg []byte) {
+	ac.rw.Lock()
+	defer ac.rw.Unlock()
+	for conn := range ac.conns {
+		_, err := conn.Write(msg)
+		if err != nil {
+			log.Printf("could not write message to %s\n", conn.RemoteAddr())
+		}
+	}
+}
+
+// Будет не только публикация, но и менеджемент соединений. Информация о новых соединениях будет поступать по каналу.
+func chatPublishing(ac *activeConnections, msgs <-chan string) {
+	for {
+		select {
+		case msg := <-msgs:
+			m := []byte(msg)
+			sendMessages(ac, m)
+		default:
+			time.Sleep(1 * time.Second)
+		}
 	}
 }
 
@@ -68,11 +98,13 @@ func funServer() {
 	}
 	log.Printf("server started on port %s\n", tcpPort)
 	msgs := make(chan string)
+	go chatPublishing(&activeConnections{}, msgs)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			log.Printf("could not accept a connection: %s\n", err)
 		}
+		//  Добавить канал оповещения о новых соединениях
 		go handleConnection(conn, msgs)
 	}
 }
