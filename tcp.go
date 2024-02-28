@@ -16,95 +16,113 @@ type activeConnections struct {
 	rw    sync.RWMutex
 }
 
-func finishConnection(conn net.Conn) {
+type connMessage struct {
+	text []byte
+	conn net.Conn
+}
+
+func newActiveConnections() *activeConnections {
+	return &activeConnections{
+		conns: map[net.Conn]struct{}{},
+		rw:    sync.RWMutex{},
+	}
+}
+
+func finishConnection(conn net.Conn, closedConnectionsCh chan<- net.Conn) {
+	closedConnectionsCh <- conn
 	conn.Close()
 	log.Printf("connection with %s was closed", conn.RemoteAddr())
 }
 
-func connReader(conn net.Conn, msgs chan string) {
-	buffer := make([]byte, 8)
+func connReader(conn net.Conn, msgsCh chan<- connMessage) {
+	buffer := make([]byte, 16)
 	for {
 		n, err := conn.Read(buffer)
 		log.Printf("read %d bytes for %s connection with %s", n, conn.RemoteAddr().Network(), conn.RemoteAddr())
 		if err != nil {
 			if err != io.EOF {
-				log.Printf("could not read the input message")
+				log.Printf("could not read the input message - %s", err)
 				return
 			}
 		}
-		msgs <- string(buffer[:n])
+		msgsCh <- connMessage{
+			text: buffer[:n],
+			conn: conn,
+		}
 	}
 }
 
-func sendMessages(ac *activeConnections, msg []byte) {
+func sendMessages(ac *activeConnections, msg connMessage) {
 	ac.rw.Lock()
 	defer ac.rw.Unlock()
 	for conn := range ac.conns {
-		_, err := conn.Write(msg)
+		if conn == msg.conn {
+			continue
+		}
+		_, err := conn.Write(msg.text)
 		if err != nil {
-			log.Printf("could not write message to %s\n", conn.RemoteAddr())
+			log.Printf("could not write message to %s", conn.RemoteAddr())
 		}
 	}
 }
 
-// Будет не только публикация, но и менеджемент соединений. Информация о новых соединениях будет поступать по каналу.
-func chatPublishing(ac *activeConnections, msgs <-chan string) {
+func chatManaging(ac *activeConnections, msgsCh <-chan connMessage, newConnectionsCh <-chan net.Conn, closedConnectionsCh <-chan net.Conn) {
 	for {
 		select {
-		case msg := <-msgs:
-			m := []byte(msg)
-			sendMessages(ac, m)
+		case msg := <-msgsCh:
+			log.Printf("new message: %s", msg)
+			sendMessages(ac, msg)
+		case newConnection := <-newConnectionsCh:
+			log.Printf("new connection: %s", newConnection)
+			ac.rw.Lock()
+			ac.conns[newConnection] = struct{}{}
+			ac.rw.Unlock()
+		case closedConnection := <-closedConnectionsCh:
+			log.Printf("closed connection: %s", closedConnection)
+			ac.rw.Lock()
+			// Баг с удалением соединений. Возможно из-за работы по значениям
+			delete(ac.conns, closedConnection)
+			ac.rw.Unlock()
 		default:
-			time.Sleep(1 * time.Second)
+			log.Printf("connections: %#v", ac.conns)
+			time.Sleep(1 * time.Millisecond)
 		}
 	}
 }
 
-func handleConnection(conn net.Conn, msgs chan string) {
-	defer finishConnection(conn)
-	log.Printf("new %s connection from address %s\n", conn.RemoteAddr().Network(), conn.RemoteAddr())
+func handleConnection(conn net.Conn, msgsCh chan<- connMessage, closedConnectionsCh chan<- net.Conn) {
+	defer finishConnection(conn, closedConnectionsCh)
+	log.Printf("new %s connection from address %s", conn.RemoteAddr().Network(), conn.RemoteAddr())
 	message := []byte("Hello, friend!\n")
 	n, err := conn.Write(message)
 	if err != nil {
-		log.Fatalf("could not write message\n")
+		log.Fatalf("could not write message")
 		return
 	}
 	if n < len(message) {
-		log.Printf("the message was not fully written to %s: expected:%d was written: %d\n",
+		log.Printf("the message was not fully written to %s: expected:%d was written: %dn",
 			conn.RemoteAddr(), len(message), n)
 		return
 	}
-	go connReader(conn, msgs)
-	// echo server via channels
-	for {
-		select {
-		case msg := <-msgs:
-			m := []byte(msg)
-			_, err := conn.Write(m)
-			if err != nil {
-				log.Fatalf("could not write message\n")
-				return
-			}
-		default:
-			time.Sleep(1 * time.Second)
-		}
-	}
+	connReader(conn, msgsCh)
 }
 
 func funServer() {
 	ln, err := net.Listen("tcp", ":"+tcpPort)
 	if err != nil {
-		log.Fatalf("could not listen to port %s: %s\n", tcpPort, err)
+		log.Fatalf("could not listen to port %s: %s", tcpPort, err)
 	}
-	log.Printf("server started on port %s\n", tcpPort)
-	msgs := make(chan string)
-	go chatPublishing(&activeConnections{}, msgs)
+	log.Printf("server started on port %s", tcpPort)
+	msgsCh := make(chan connMessage)
+	newConnectionsCh := make(chan net.Conn)
+	closedConnectionsCh := make(chan net.Conn)
+	go chatManaging(newActiveConnections(), msgsCh, newConnectionsCh, closedConnectionsCh)
 	for {
 		conn, err := ln.Accept()
+		newConnectionsCh <- conn
 		if err != nil {
-			log.Printf("could not accept a connection: %s\n", err)
+			log.Printf("could not accept a connection: %s", err)
 		}
-		//  Добавить канал оповещения о новых соединениях
-		go handleConnection(conn, msgs)
+		go handleConnection(conn, msgsCh, closedConnectionsCh)
 	}
 }
