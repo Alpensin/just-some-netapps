@@ -43,6 +43,9 @@ func connReader(conn net.Conn, msgsCh chan<- connMessage) {
 			if err != io.EOF {
 				log.Printf("could not read the input message - %s", err)
 				return
+			} else {
+				log.Print("received EOF", err)
+				return
 			}
 		}
 		msgsCh <- connMessage{
@@ -80,11 +83,13 @@ func chatManaging(ac *activeConnections, msgsCh <-chan connMessage, newConnectio
 		case closedConnection := <-closedConnectionsCh:
 			log.Printf("closed connection: %s", closedConnection)
 			ac.rw.Lock()
-			// Баг с удалением соединений. Возможно из-за работы по значениям
+			log.Printf("ac.conns before delete: %#v", ac.conns)
+			log.Printf("closedConnection to delete: %#v", closedConnection)
 			delete(ac.conns, closedConnection)
+			log.Printf("ac.conns after delete: %#v", ac.conns)
 			ac.rw.Unlock()
 		default:
-			log.Printf("connections: %#v", ac.conns)
+			// log.Printf("connections: %#v", ac.conns)
 			time.Sleep(1 * time.Millisecond)
 		}
 	}
@@ -100,7 +105,7 @@ func handleConnection(conn net.Conn, msgsCh chan<- connMessage, closedConnection
 		return
 	}
 	if n < len(message) {
-		log.Printf("the message was not fully written to %s: expected:%d was written: %dn",
+		log.Printf("the message was not fully written to %s: expected:%d was written: %d",
 			conn.RemoteAddr(), len(message), n)
 		return
 	}
