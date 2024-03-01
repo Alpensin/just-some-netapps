@@ -1,6 +1,8 @@
-// some low level network fun
+// some net fun
 package main
 
+import "github.com/alpensin/netfun/chat"
+
 func main() {
-	funServer()
+	chat.TCPChatServer()
 }

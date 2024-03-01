@@ -1,15 +1,17 @@
-// tcp server fun
-package main
+// Package chat server fun
+package chat
 
 import (
 	"io"
 	"log"
 	"net"
 	"sync"
-	"time"
 )
 
-const tcpPort = "6969"
+const (
+	tcpPort    = "6969"
+	bufferSize = 256
+)
 
 type activeConnections struct {
 	conns map[net.Conn]struct{}
@@ -35,7 +37,7 @@ func finishConnection(conn net.Conn, closedConnectionsCh chan<- net.Conn) {
 }
 
 func connReader(conn net.Conn, msgsCh chan<- connMessage) {
-	buffer := make([]byte, 16)
+	buffer := make([]byte, bufferSize)
 	for {
 		n, err := conn.Read(buffer)
 		log.Printf("read %d bytes for %s connection with %s", n, conn.RemoteAddr().Network(), conn.RemoteAddr())
@@ -43,10 +45,9 @@ func connReader(conn net.Conn, msgsCh chan<- connMessage) {
 			if err != io.EOF {
 				log.Printf("could not read the input message - %s", err)
 				return
-			} else {
-				log.Print("received EOF", err)
-				return
 			}
+			log.Print("received EOF", err)
+			return
 		}
 		msgsCh <- connMessage{
 			text: buffer[:n],
@@ -73,24 +74,19 @@ func chatManaging(ac *activeConnections, msgsCh <-chan connMessage, newConnectio
 	for {
 		select {
 		case msg := <-msgsCh:
-			log.Printf("new message: %s", msg)
 			sendMessages(ac, msg)
 		case newConnection := <-newConnectionsCh:
-			log.Printf("new connection: %s", newConnection)
+			log.Printf("new connection: %s", newConnection.RemoteAddr())
 			ac.rw.Lock()
 			ac.conns[newConnection] = struct{}{}
 			ac.rw.Unlock()
 		case closedConnection := <-closedConnectionsCh:
-			log.Printf("closed connection: %s", closedConnection)
+			log.Printf("closed connection: %s", closedConnection.RemoteAddr())
 			ac.rw.Lock()
-			log.Printf("ac.conns before delete: %#v", ac.conns)
-			log.Printf("closedConnection to delete: %#v", closedConnection)
+			log.Printf("closedConnection to delete: %s", closedConnection.RemoteAddr())
 			delete(ac.conns, closedConnection)
-			log.Printf("ac.conns after delete: %#v", ac.conns)
+			log.Printf("Active connections left: %d", len(ac.conns))
 			ac.rw.Unlock()
-		default:
-			// log.Printf("connections: %#v", ac.conns)
-			time.Sleep(1 * time.Millisecond)
 		}
 	}
 }
@@ -112,8 +108,16 @@ func handleConnection(conn net.Conn, msgsCh chan<- connMessage, closedConnection
 	connReader(conn, msgsCh)
 }
 
-func funServer() {
+// TCPChatServer - simple TCP chat server
+func TCPChatServer() {
 	ln, err := net.Listen("tcp", ":"+tcpPort)
+	defer func() {
+		err := ln.Close()
+		if err != nil {
+			log.Fatal("listener faild to close")
+		}
+	}()
+
 	if err != nil {
 		log.Fatalf("could not listen to port %s: %s", tcpPort, err)
 	}
@@ -124,10 +128,11 @@ func funServer() {
 	go chatManaging(newActiveConnections(), msgsCh, newConnectionsCh, closedConnectionsCh)
 	for {
 		conn, err := ln.Accept()
-		newConnectionsCh <- conn
 		if err != nil {
 			log.Printf("could not accept a connection: %s", err)
+			continue
 		}
+		newConnectionsCh <- conn
 		go handleConnection(conn, msgsCh, closedConnectionsCh)
 	}
 }
